@@ -1,0 +1,294 @@
+-- Aimbot with ESP for Breaking Point
+-- Press [ to toggle tracking
+-- Right click to look around freely, resumes when released
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+local camera = workspace.CurrentCamera
+
+local isTracking = false
+local targetPlayer = nil
+local rightClickPressed = false
+
+-- ESP/Highlight state
+local targetHighlight = nil
+local targetTracer = nil
+
+-- ========================================
+-- GET CLOSEST PLAYER (PRIORITIZE DISTANCE FROM PLAYER, THEN MOUSE)
+-- ========================================
+local function getClosestPlayerToCursor()
+    local closestPlayer = nil
+    local closestPlayerDistance = math.huge
+    local closestMouseDistance = math.huge
+    local mousePos = Vector2.new(mouse.X, mouse.Y)
+    local playerPos = player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position
+    
+    for _, otherPlayer in pairs(Players:GetPlayers()) do
+        if otherPlayer ~= player and otherPlayer.Character then
+            local character = otherPlayer.Character
+            local targetPart = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head") 
+                or character:FindFirstChild("Torso") 
+                or character:FindFirstChild("UpperTorso")
+            
+            if targetPart then
+                -- Calculate distance from player
+                local distFromPlayer = playerPos and (targetPart.Position - playerPos).Magnitude or math.huge
+                
+                -- Calculate distance from mouse
+                local screenPos, onScreen = camera:WorldToViewportPoint(targetPart.Position)
+                local distFromMouse = onScreen and (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude or math.huge
+                
+                if onScreen and distFromMouse < 300 then  -- FOV limit
+                    -- Prioritize by distance from player first, then by distance from mouse
+                    if distFromPlayer < closestPlayerDistance or 
+                       (distFromPlayer == closestPlayerDistance and distFromMouse < closestMouseDistance) then
+                        closestPlayer = otherPlayer
+                        closestPlayerDistance = distFromPlayer
+                        closestMouseDistance = distFromMouse
+                    end
+                end
+            end
+        end
+    end
+    
+    return closestPlayer
+end
+
+-- ========================================
+-- WALLCHECK - LINE OF SIGHT DETECTION
+-- ========================================
+local function hasLineOfSight(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then
+        return false
+    end
+    
+    local targetPart = targetPlayer.Character:FindFirstChild("Head") 
+        or targetPlayer.Character:FindFirstChild("Torso") 
+        or targetPlayer.Character:FindFirstChild("UpperTorso")
+    
+    if not targetPart then
+        return false
+    end
+    
+    local cameraPos = camera.CFrame.Position
+    local targetPos = targetPart.Position
+    local direction = (targetPos - cameraPos).Unit
+    local distance = (targetPos - cameraPos).Magnitude
+    
+    local ray = Ray.new(cameraPos, direction * distance)
+    local part, hitPos = workspace:FindPartOnRay(ray, player.Character)
+    
+    -- If we hit the target or nothing (clear line), return true
+    if not part or part.Parent == targetPlayer.Character then
+        return true
+    end
+    
+    return false
+end
+
+-- ========================================
+-- ESP HIGHLIGHT
+-- ========================================
+local function clearHighlight()
+    if targetHighlight then
+        targetHighlight:Destroy()
+        targetHighlight = nil
+    end
+end
+
+local function applyHighlight(targetChar)
+    clearHighlight()
+    local hl = Instance.new("Highlight")
+    hl.Adornee = targetChar
+    hl.FillColor = Color3.fromRGB(255, 0, 0)
+    hl.OutlineColor = Color3.fromRGB(0, 200, 200)
+    hl.FillTransparency = 0.5
+    hl.OutlineTransparency = 0
+    hl.DepthMode = Enum.HighlightDepthMode.Occluded
+    
+    local ok = pcall(function() hl.Parent = CoreGui end)
+    if not ok then
+        hl.Parent = player:WaitForChild("PlayerGui")
+    end
+    
+    targetHighlight = hl
+end
+
+-- ========================================
+-- ESP TRACER
+-- ========================================
+local function clearTracer()
+    if targetTracer then
+        targetTracer.Visible = false
+        targetTracer:Remove()
+        targetTracer = nil
+    end
+end
+
+local function applyTracer()
+    clearTracer()
+    local line = Drawing.new("Line")
+    line.Thickness = 1
+    line.Color = Color3.fromRGB(0, 200, 200)
+    line.Transparency = 1
+    targetTracer = line
+end
+
+local function updateTracer()
+    if not targetTracer or not targetPlayer or not targetPlayer.Character then
+        return
+    end
+    
+    local rootPart = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local headPart = targetPlayer.Character:FindFirstChild("Head")
+    
+    local targetPos
+    if rootPart and headPart then
+        -- Blend 80% rootpart + 20% head
+        targetPos = rootPart.Position * 0.8 + headPart.Position * 0.2
+    elseif rootPart then
+        targetPos = rootPart.Position
+    elseif headPart then
+        targetPos = headPart.Position
+    else
+        return
+    end
+    
+    local screenPos, onScreen = camera:WorldToViewportPoint(targetPos)
+    if not onScreen or screenPos.Z < 0 then
+        targetTracer.Visible = false
+        return
+    end
+    
+    local cameraPos = camera.CFrame.Position
+    local direction = targetPos - cameraPos
+    
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {targetPlayer.Character, player.Character}
+    
+    local result = workspace:Raycast(cameraPos, direction, params)
+    
+    if result then
+        targetTracer.Visible = false
+        return
+    end
+    
+    local viewportSize = camera.ViewportSize
+    local origin = Vector2.new(viewportSize.X / 2, viewportSize.Y)
+    
+    targetTracer.From = origin
+    targetTracer.To = Vector2.new(screenPos.X, screenPos.Y)
+    targetTracer.Visible = true
+end
+
+-- ========================================
+-- AIM AT POSITION
+-- ========================================
+local function aimAtPosition(worldPos)
+    local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
+    
+    if onScreen then
+        if mousemoveabs then
+            mousemoveabs(screenPos.X, screenPos.Y)
+        else
+            local currentMousePos = UserInputService:GetMouseLocation()
+            local deltaX = screenPos.X - currentMousePos.X
+            local deltaY = screenPos.Y - currentMousePos.Y
+            
+            if mousemoverel then
+                mousemoverel(deltaX, deltaY)
+            end
+        end
+    end
+end
+
+-- ========================================
+-- INPUT HANDLING
+-- ========================================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    -- [ key - Toggle lock
+    if input.KeyCode == Enum.KeyCode.LeftBracket then
+        isTracking = not isTracking
+        
+        if isTracking then
+            targetPlayer = getClosestPlayerToCursor()
+            if targetPlayer then
+                applyHighlight(targetPlayer.Character)
+                applyTracer()
+            else
+                isTracking = false
+            end
+        else
+            targetPlayer = nil
+            clearHighlight()
+            clearTracer()
+        end
+    end
+    
+    -- Right click - Pause aiming (can look around)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        rightClickPressed = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        rightClickPressed = false
+    end
+end)
+
+-- ========================================
+-- MAIN LOOP - AIM AT TARGET
+-- ========================================
+RunService.RenderStepped:Connect(function()
+    -- Check if target died
+    if isTracking and targetPlayer then
+        if not targetPlayer.Character then
+            isTracking = false
+            targetPlayer = nil
+            clearHighlight()
+            clearTracer()
+            return
+        end
+        
+        local humanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then
+            isTracking = false
+            targetPlayer = nil
+            clearHighlight()
+            clearTracer()
+            return
+        end
+    end
+    
+    -- Update tracer
+    if isTracking and targetPlayer then
+        updateTracer()
+    end
+    
+    -- Aim at target (unless right click is held)
+    if isTracking and targetPlayer and not rightClickPressed then
+        local character = targetPlayer.Character
+        local rootPart = character:FindFirstChild("HumanoidRootPart")
+        local headPart = character:FindFirstChild("Head")
+        
+        if rootPart and headPart then
+            -- Blend 80% rootpart + 20% head
+            local aimPos = rootPart.Position * 0.8 + headPart.Position * 0.2
+            aimAtPosition(aimPos)
+        elseif rootPart then
+            aimAtPosition(rootPart.Position)
+        elseif headPart then
+            aimAtPosition(headPart.Position)
+        end
+    end
+end)
