@@ -1,52 +1,111 @@
-local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local CoreGui = game:GetService("CoreGui")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 
-local player = Players.LocalPlayer
-local mouse = player:GetMouse()
-local camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+local CurrentCamera = Workspace.CurrentCamera
 
-local isTracking = false
+local MouseLock = {
+    Settings = {
+        Prediction = 0.04,
+        AimPart = 'HumanoidRootPart',
+        Smoothing = 0.5,
+        MaxDistance = 500,
+    }
+}
+
+_G.MouseLockSettings = MouseLock.Settings
+
+local RGB_SPEED = 0.3
+local MOUSE_WEIGHT = 0.5
+
+local isLocking = false
+local isRightClickHeld = false
+local scriptEnabled = false
 local targetPlayer = nil
-local rightClickPressed = false
-
--- ESP/Highlight state
+local lockConnection = nil
+local highlightConnection = nil
 local targetHighlight = nil
-local targetTracer = nil
 
----
---- Utility Functions
----
+local button = script.Parent
+if not button:IsA("GuiButton") then
+    button = nil
+end
 
-local function getClosestPlayerToCursor()
-    local closestPlayer = nil
-    local closestPlayerDistance = math.huge
-    local closestMouseDistance = math.huge
-    local mousePos = UserInputService:GetMouseLocation()
-    local playerPos = player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position
+local keybindValue = script:FindFirstChild("Keybind")
+if not keybindValue then
+    keybindValue = Instance.new("StringValue")
+    keybindValue.Name = "Keybind"
+    keybindValue.Value = "LeftBracket"
+    keybindValue.Parent = script
+end
+
+local function GetCurrentKey()
+    return Enum.KeyCode[keybindValue.Value] or Enum.KeyCode.LeftBracket
+end
+local isRightClickHeld = false
+
+local function CreateHighlight()
+    if targetHighlight then
+        targetHighlight:Destroy()
+    end
     
-    for _, otherPlayer in pairs(Players:GetPlayers()) do
-        if otherPlayer ~= player and otherPlayer.Character then
-            local character = otherPlayer.Character
-            local targetPart = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head") 
-                or character:FindFirstChild("Torso") 
-                or character:FindFirstChild("UpperTorso")
-            
-            if targetPart then
-                -- Calculate distance from player
-                local distFromPlayer = playerPos and (targetPart.Position - playerPos).Magnitude or math.huge
+    targetHighlight = Instance.new("Highlight")
+    targetHighlight.FillTransparency = 0.8
+    targetHighlight.OutlineTransparency = 0.4
+    targetHighlight.OutlineColor = Color3.new(1, 1, 1)
+    
+    return targetHighlight
+end
+
+local function UpdateHighlightColor()
+    if targetHighlight and targetHighlight.Parent then
+        local hue = (tick() * RGB_SPEED) % 1
+        targetHighlight.FillColor = Color3.fromHSV(hue, 1, 1)
+    end
+end
+
+local function FindClosestPlayer()
+    local closestPlayer = nil
+    local bestScore = math.huge
+    
+    local playerCharacter = LocalPlayer.Character
+    if not playerCharacter then return nil end
+    
+    local playerRoot = playerCharacter:FindFirstChild("HumanoidRootPart")
+    if not playerRoot then return nil end
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local character = player.Character
+            if character then
+                local humanoid = character:FindFirstChild("Humanoid")
+                local rootPart = character:FindFirstChild("HumanoidRootPart")
                 
-                -- Calculate distance from mouse
-                local screenPos, onScreen = camera:WorldToViewportPoint(targetPart.Position)
-                local distFromMouse = onScreen and (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude or math.huge
-                
-                if onScreen and distFromMouse < 300 then  -- FOV limit
-                    if distFromPlayer < closestPlayerDistance or 
-                       (distFromPlayer == closestPlayerDistance and distFromMouse < closestMouseDistance) then
-                        closestPlayer = otherPlayer
-                        closestPlayerDistance = distFromPlayer
-                        closestMouseDistance = distFromMouse
+                if humanoid and humanoid.Health > 0 and rootPart then
+                    local worldDistance = (rootPart.Position - playerRoot.Position).Magnitude
+                    
+                    if worldDistance <= MouseLock.Settings.MaxDistance then
+                        local screenPos, onScreen = CurrentCamera:WorldToViewportPoint(rootPart.Position)
+                        
+                        if onScreen then
+                            local mousePos = Vector2.new(Mouse.X, Mouse.Y)
+                            local targetPos = Vector2.new(screenPos.X, screenPos.Y)
+                            local mouseDistance = (targetPos - mousePos).Magnitude
+                            
+                            local normalizedMouseDist = mouseDistance / 1000
+                            local normalizedWorldDist = worldDistance / MouseLock.Settings.MaxDistance
+                            
+                            local score = (normalizedMouseDist * MOUSE_WEIGHT) + 
+                                         (normalizedWorldDist * (1 - MOUSE_WEIGHT))
+                            
+                            if score < bestScore then
+                                closestPlayer = player
+                                bestScore = score
+                            end
+                        end
                     end
                 end
             end
@@ -56,173 +115,111 @@ local function getClosestPlayerToCursor()
     return closestPlayer
 end
 
-local function clearHighlight()
+local function IsTargetValid()
+    if not targetPlayer then return false end
+    if not targetPlayer.Character then return false end
+    
+    local humanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+    
+    local aimPart = targetPlayer.Character:FindFirstChild(MouseLock.Settings.AimPart)
+    if not aimPart then return false end
+    
+    return true
+end
+
+local function AimAtTarget()
+    if not isLocking or not IsTargetValid() or isRightClickHeld then
+        return
+    end
+    
+    local aimPart = targetPlayer.Character:FindFirstChild(MouseLock.Settings.AimPart)
+    local predictedPosition = aimPart.Position + (aimPart.Velocity * MouseLock.Settings.Prediction)
+    local screenPos = CurrentCamera:WorldToScreenPoint(predictedPosition)
+    
+    local deltaX = (screenPos.X - Mouse.X) * MouseLock.Settings.Smoothing
+    local deltaY = (screenPos.Y - Mouse.Y) * MouseLock.Settings.Smoothing
+    
+    mousemoverel(deltaX, deltaY)
+end
+
+local function StartLock()
+    if isLocking then return end
+    
+    targetPlayer = FindClosestPlayer()
+    
+    if targetPlayer and targetPlayer.Character then
+        isLocking = true
+        
+        local highlight = CreateHighlight()
+        highlight.Parent = targetPlayer.Character
+        
+        if not lockConnection then
+            lockConnection = RunService.RenderStepped:Connect(AimAtTarget)
+        end
+        
+        if not highlightConnection then
+            highlightConnection = RunService.RenderStepped:Connect(UpdateHighlightColor)
+        end
+    end
+end
+
+local function StopLock()
+    isLocking = false
+    targetPlayer = nil
+    
     if targetHighlight then
         targetHighlight:Destroy()
         targetHighlight = nil
     end
-end
-
-local function applyHighlight(targetChar)
-    clearHighlight()
-    local hl = Instance.new("Highlight")
-    hl.Adornee = targetChar
-    hl.FillColor = Color3.fromRGB(255, 0, 0)
-    hl.OutlineColor = Color3.fromRGB(0, 200, 200)
-    hl.FillTransparency = 0.5
-    hl.OutlineTransparency = 0
-    hl.DepthMode = Enum.HighlightDepthMode.Occluded
     
-    local ok = pcall(function() hl.Parent = CoreGui end)
-    if not ok then
-        hl.Parent = player:WaitForChild("PlayerGui")
+    if lockConnection then
+        lockConnection:Disconnect()
+        lockConnection = nil
     end
     
-    targetHighlight = hl
-end
-
-local function clearTracer()
-    if targetTracer then
-        targetTracer.Visible = false
-        targetTracer:Remove()
-        targetTracer = nil
+    if highlightConnection then
+        highlightConnection:Disconnect()
+        highlightConnection = nil
     end
 end
-
-local function applyTracer()
-    clearTracer()
-    local line = Drawing.new("Line")
-    line.Thickness = 1
-    line.Color = Color3.fromRGB(0, 200, 200)
-    line.Transparency = 1
-    targetTracer = line
-end
-
-local function updateTracer()
-    if not targetTracer or not targetPlayer or not targetPlayer.Character then
-        return
-    end
-    
-    local rootPart = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    local headPart = targetPlayer.Character:FindFirstChild("Head")
-    
-    local targetPos
-    if rootPart and headPart then
-        targetPos = rootPart.Position * 0.8 + headPart.Position * 0.2
-    elseif rootPart then
-        targetPos = rootPart.Position
-    elseif headPart then
-        targetPos = headPart.Position
-    else
-        return
-    end
-    
-    local screenPos, onScreen = camera:WorldToViewportPoint(targetPos)
-    if not onScreen or screenPos.Z < 0 then
-        targetTracer.Visible = false
-        return
-    end
-    
-    local viewportSize = camera.ViewportSize
-    local origin = Vector2.new(viewportSize.X / 2, viewportSize.Y)
-    
-    targetTracer.From = origin
-    targetTracer.To = Vector2.new(screenPos.X, screenPos.Y)
-    targetTracer.Visible = true
-end
-
-local function aimAtPosition(worldPos)
-    local screenPos, onScreen = camera:WorldToViewportPoint(worldPos)
-    
-    if onScreen then
-        if mousemoveabs then
-            mousemoveabs(screenPos.X, screenPos.Y)
-        else
-            local currentMousePos = UserInputService:GetMouseLocation()
-            local deltaX = screenPos.X - currentMousePos.X
-            local deltaY = screenPos.Y - currentMousePos.Y
-            
-            if mousemoverel then
-                mousemoverel(deltaX, deltaY)
-            end
-        end
-    end
-end
-
----
---- Input Handling
----
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    -- Don't trigger if typing in chat
-    if gameProcessed then return end
+    if gameProcessed or not scriptEnabled then return end
     
-    -- Toggles: Left Bracket ([) OR E key
-    if input.KeyCode == Enum.KeyCode.LeftBracket or input.KeyCode == Enum.KeyCode.E then
-        isTracking = not isTracking
-        
-        if isTracking then
-            targetPlayer = getClosestPlayerToCursor()
-            if targetPlayer then
-                applyHighlight(targetPlayer.Character)
-                applyTracer()
-            else
-                isTracking = false
-            end
-        else
-            targetPlayer = nil
-            clearHighlight()
-            clearTracer()
-        end
+    if input.KeyCode == GetCurrentKey() then
+        StartLock()
     end
     
-    -- Right click - Hold to temporarily free look
     if input.UserInputType == Enum.UserInputType.MouseButton2 then
-        rightClickPressed = true
+        isRightClickHeld = true
     end
 end)
 
-UserInputService.InputEnded:Connect(function(input)
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+    if not scriptEnabled then return end
+    
+    if input.KeyCode == GetCurrentKey() then
+        StopLock()
+    end
+    
     if input.UserInputType == Enum.UserInputType.MouseButton2 then
-        rightClickPressed = false
+        isRightClickHeld = false
     end
 end)
 
----
---- Main Loop
----
+RunService.Heartbeat:Connect(function()
+    if isLocking and not IsTargetValid() then
+        StopLock()
+    end
+end)
 
-RunService.RenderStepped:Connect(function()
-    -- Validation: Check if target exists and is alive
-    if isTracking and targetPlayer then
-        if not targetPlayer.Character or not targetPlayer.Character:FindFirstChild("Humanoid") or targetPlayer.Character.Humanoid.Health <= 0 then
-            isTracking = false
-            targetPlayer = nil
-            clearHighlight()
-            clearTracer()
-            return
-        end
-    end
-    
-    -- Update visuals
-    if isTracking and targetPlayer then
-        updateTracer()
-    end
-    
-    -- Aim Logic
-    if isTracking and targetPlayer and not rightClickPressed then
-        local character = targetPlayer.Character
-        local rootPart = character:FindFirstChild("HumanoidRootPart")
-        local headPart = character:FindFirstChild("Head")
+if button then
+    button.MouseButton1Click:Connect(function()
+        scriptEnabled = not scriptEnabled
         
-        if rootPart and headPart then
-            -- Aiming slightly below head (upper torso area)
-            local aimPos = rootPart.Position * 0.8 + headPart.Position * 0.2
-            aimAtPosition(aimPos)
-        elseif rootPart then
-            aimAtPosition(rootPart.Position)
-        elseif headPart then
-            aimAtPosition(headPart.Position)
+        if not scriptEnabled and isLocking then
+            StopLock()
         end
-    end
-end)
+    end)
+end
