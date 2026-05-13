@@ -9,6 +9,7 @@ local CurrentCamera = Workspace.CurrentCamera
 
 local MouseLock = {
     Settings = {
+        Key = Enum.KeyCode.LeftBracket,
         Prediction = 0.04,
         AimPart = 'HumanoidRootPart',
         Smoothing = 0.5,
@@ -16,36 +17,15 @@ local MouseLock = {
     }
 }
 
-_G.MouseLockSettings = MouseLock.Settings
-
 local RGB_SPEED = 0.3
 local MOUSE_WEIGHT = 0.5
 
 local isLocking = false
 local isRightClickHeld = false
-local scriptEnabled = false
 local targetPlayer = nil
 local lockConnection = nil
 local highlightConnection = nil
 local targetHighlight = nil
-
-local button = script.Parent
-if not button:IsA("GuiButton") then
-    button = nil
-end
-
-local keybindValue = script:FindFirstChild("Keybind")
-if not keybindValue then
-    keybindValue = Instance.new("StringValue")
-    keybindValue.Name = "Keybind"
-    keybindValue.Value = "LeftBracket"
-    keybindValue.Parent = script
-end
-
-local function GetCurrentKey()
-    return Enum.KeyCode[keybindValue.Value] or Enum.KeyCode.LeftBracket
-end
-local isRightClickHeld = false
 
 local function CreateHighlight()
     if targetHighlight then
@@ -185,9 +165,9 @@ local function StopLock()
 end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed or not scriptEnabled then return end
+    if gameProcessed then return end
     
-    if input.KeyCode == GetCurrentKey() then
+    if input.KeyCode == MouseLock.Settings.Key then
         StartLock()
     end
     
@@ -197,9 +177,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 end)
 
 UserInputService.InputEnded:Connect(function(input, gameProcessed)
-    if not scriptEnabled then return end
-    
-    if input.KeyCode == GetCurrentKey() then
+    if input.KeyCode == MouseLock.Settings.Key then
         StopLock()
     end
     
@@ -214,12 +192,52 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
-if button then
-    button.MouseButton1Click:Connect(function()
-        scriptEnabled = not scriptEnabled
-        
-        if not scriptEnabled and isLocking then
-            StopLock()
-        end
-    end)
+-- =============================================
+-- Persistent Target Highlight from UI
+-- =============================================
+
+local targetUIPath = LocalPlayer:WaitForChild("PlayerGui")
+    :WaitForChild("GameUI")
+    :WaitForChild("HUD")
+    :WaitForChild("TargetUI")
+    :WaitForChild("TargetHolder")
+local targetNameLabel = targetUIPath:WaitForChild("TargetName")
+
+local persistentHighlight = Instance.new("Highlight")
+persistentHighlight.Name = "PersistentTargetHighlight"
+persistentHighlight.FillColor = Color3.fromRGB(255, 0, 0)
+persistentHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+persistentHighlight.FillTransparency = 0.5
+persistentHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+
+local charConnection
+
+local function applyToCharacter(character)
+    if character then
+        persistentHighlight.Adornee = character
+        persistentHighlight.Parent = character
+    end
 end
+
+local function updateHighlight()
+    local targetName = targetNameLabel.Text
+    local uiTargetPlayer = Players:FindFirstChild(targetName)
+
+    if charConnection then
+        charConnection:Disconnect()
+        charConnection = nil
+    end
+
+    if uiTargetPlayer then
+        applyToCharacter(uiTargetPlayer.Character)
+        charConnection = uiTargetPlayer.CharacterAdded:Connect(function(newCharacter)
+            applyToCharacter(newCharacter)
+        end)
+    else
+        persistentHighlight.Adornee = nil
+        persistentHighlight.Parent = nil
+    end
+end
+
+targetNameLabel:GetPropertyChangedSignal("Text"):Connect(updateHighlight)
+updateHighlight()
