@@ -1,0 +1,45 @@
+local Players = game:GetService("Players")
+locarl RunService = game:GetService("RunService")
+local plr = Players.LocalPlayer
+local PROXIMITY = 60
+local LOCK_DURATION = 0.09
+local UNDER_OFFSET = Vector3.new(0, -3, 0)
+local TARGET_COLOR = Color3.fromRGB(40, 127, 71)
+local activePart = nil
+
+local function setOthersCollide(skip, state)
+	for _, part in ipairs(workspace.WorldIgnore.Projectiles:GetChildren()) do
+		if part ~= skip and part:IsA("BasePart") then part.CanCollide = state end
+	end
+end
+
+workspace.WorldIgnore.Projectiles.ChildAdded:Connect(function(part)
+	if not part:IsA("BasePart") then return end
+	if part.Color ~= TARGET_COLOR then part.CanCollide = false return end
+	if activePart then return end
+	local char = plr.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	if (part.Position - root.Position).Magnitude > PROXIMITY then part.CanCollide = false return end
+	activePart = part
+	part.Anchored = true
+	part.CanCollide = true
+	setOthersCollide(part, false)
+	local startTime = tick()
+	local conn
+	conn = RunService.Heartbeat:Connect(function()
+		if not part or not part.Parent or (tick() - startTime) >= LOCK_DURATION then
+			if conn then conn:Disconnect() end
+			if part and part.Parent then part.Anchored = false end
+			setOthersCollide(nil, false)
+			activePart = nil
+			return
+		end
+		local c = plr.Character
+		local r = c and c:FindFirstChild("HumanoidRootPart")
+		if not r then return end
+		part.CanCollide = true
+		part.Anchored = true
+		part.CFrame = CFrame.new(r.Position + UNDER_OFFSET)
+	end)
+end)
